@@ -9,12 +9,14 @@ import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
 import { Mic, MicOff, Settings, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock } from 'lucide-react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
-// MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
 import AuthLock from './components/AuthLock';
 import KasaWindow from './components/KasaWindow';
 import PrinterWindow from './components/PrinterWindow';
 import SettingsWindow from './components/SettingsWindow';
+import ThreeViewer from "./components/ThreeViewer/ThreeViewer";
+import GestureCanvas from "./components/GestureCanvas/GestureCanvas";
+import FaceEmote from "./components/FaceEmote/FaceEmote";
 
 
 
@@ -22,6 +24,7 @@ const socket = io('http://localhost:8000');
 const { ipcRenderer } = window.require('electron');
 
 function App() {
+    const [uiMode, setUiMode] = useState("idle");
     const [status, setStatus] = useState('Disconnected');
     const [socketConnected, setSocketConnected] = useState(socket.connected); // Track socket connection reactively
     // Auth State
@@ -44,7 +47,8 @@ function App() {
     });
 
 
-    const [isConnected, setIsConnected] = useState(true); // Power state DEFAULT ON
+    const [isConnected, setIsConnected] = useState(false); // Power state DEFAULT ON
+    const [isSpeaking, setIsSpeaking] = useState(false);
     const [isMuted, setIsMuted] = useState(true); // Mic state DEFAULT MUTED
     const [isVideoOn, setIsVideoOn] = useState(false); // Video state
     const [messages, setMessages] = useState([]);
@@ -158,9 +162,31 @@ function App() {
     const smoothedCursorPosRef = useRef({ x: 0, y: 0 });
     const snapStateRef = useRef({ isSnapped: false, element: null, snapPos: { x: 0, y: 0 } });
 
+    useEffect(() => {
+        const handleSpeaking = (e) => {
+            setIsSpeaking(e.detail);
+        };
+
+        window.addEventListener("ui-speaking", handleSpeaking);
+
+        return () => {
+            window.removeEventListener("ui-speaking", handleSpeaking);
+        };
+    }, []);
+
     // Mouse Drag Refs
     const dragOffsetRef = useRef({ x: 0, y: 0 });
     const isDraggingRef = useRef(false);
+
+    useEffect(() => {
+        socket.on("ui:mode", ({ mode }) => {
+            console.log("UI MODE:", mode);
+            setUiMode(mode);
+        });
+
+        return () => socket.off("ui:mode");
+    }, []);
+
 
     // Update refs when state changes
     useEffect(() => {
@@ -1074,7 +1100,7 @@ function App() {
     const togglePower = () => {
         if (isConnected) {
             socket.emit('stop_audio');
-            setIsConnected(false);
+            setIsConnected(true);
             setIsMuted(false); // Reset mute state
         } else {
             const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
@@ -1085,7 +1111,10 @@ function App() {
     };
 
     const toggleMute = () => {
-        if (!isConnected) return; // Can't mute if not connected
+        if (!isConnected) {
+            console.warn("Mic toggle ignored: not connected");
+            return;
+        }
 
         if (isMuted) {
             socket.emit('resume_audio');
@@ -1340,7 +1369,46 @@ function App() {
         setShowPrinterWindow(!showPrinterWindow);
     };
 
+    useEffect(() => {
+        const onSpeaking = (e) => {
+            setIsSpeaking(e.detail);
+        };
 
+        const onExpression = (e) => {
+            setExpression(e.detail.expr);
+        };
+
+        window.addEventListener("ui-speaking", onSpeaking);
+        window.addEventListener("ui-expression", onExpression);
+
+        return () => {
+            window.removeEventListener("ui-speaking", onSpeaking);
+            window.removeEventListener("ui-expression", onExpression);
+        };
+    }, []);
+
+    const [uiExpression, setUiExpression] = useState("neutral");
+    const [uiViseme, setUiViseme] = useState(0);
+
+    useEffect(() => {
+        socket.on("ui:expression", ({ expr }) => {
+            setUiExpression(expr || "neutral");
+        });
+
+        socket.on("ui:speaking", (value) => {
+            setIsSpeaking(!!value);
+        });
+
+        socket.on("ui:viseme", (v) => {
+            setUiViseme(v || 0);
+        });
+
+        return () => {
+            socket.off("ui:expression");
+            socket.off("ui:speaking");
+            socket.off("ui:viseme");
+        };
+    }, []);
 
     return (
         <div className="h-screen w-screen bg-black text-cyan-100 font-mono overflow-hidden flex flex-col relative selection:bg-cyan-900 selection:text-white">
@@ -1397,7 +1465,7 @@ function App() {
             <div className="z-50 flex items-center justify-between p-2 border-b border-cyan-500/20 bg-black/40 backdrop-blur-md select-none sticky top-0" style={{ WebkitAppRegion: 'drag' }}>
                 <div className="flex items-center gap-4 pl-2">
                     <h1 className="text-xl font-bold tracking-[0.2em] text-cyan-400 drop-shadow-[0_0_10px_rgba(34,211,238,0.5)]">
-                        A.D.A
+                        L.E.O.N
                     </h1>
                     <div className="text-[10px] text-cyan-700 border border-cyan-900 px-1 rounded">
                         V2.0.0
@@ -1449,7 +1517,6 @@ function App() {
 
             {/* Main Content */}
             <div className="flex-1 relative z-10 flex flex-col items-center justify-center">
-                {/* Central Visualizer (AI Audio) */}
                 <div
                     id="visualizer"
                     className={`absolute flex items-center justify-center transition-all duration-200 
@@ -1471,9 +1538,13 @@ function App() {
                             audioData={aiAudioData}
                             isListening={isConnected && !isMuted}
                             intensity={audioAmp}
-                            width={elementSizes.visualizer.w}
-                            height={elementSizes.visualizer.h}
+
+                            expression={uiExpression}
+                            isSpeaking={isSpeaking}
+                            viseme={uiViseme}
                         />
+                    </div>
+                    <div className="absolute inset-0 z-15 pointer-events-auto">
                     </div>
                     {isModularMode && <div className={`absolute top-2 right-2 text-xs font-bold tracking-widest z-20 ${activeDragElement === 'visualizer' ? 'text-green-500' : 'text-yellow-500/50'}`}>VISUALIZER</div>}
                 </div>
@@ -1685,6 +1756,16 @@ function App() {
                     onConfirm={handleConfirmTool}
                     onDeny={handleDenyTool}
                 />
+                {uiMode === "3d" && (
+                <>
+                    {/* 3D VIEWER */}
+                    <div className="absolute inset-0 z-30 pointer-events-auto">
+                    <ThreeViewer />
+                    </div>
+                    <GestureCanvas />
+                </>
+                )}
+
             </div>
         </div>
     );

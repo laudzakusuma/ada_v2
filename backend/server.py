@@ -173,6 +173,28 @@ async def disconnect(sid):
     print(f"Client disconnected: {sid}")
 
 @sio.event
+async def set_mode(sid, data):
+    # data = { "mode": "3d" }
+    pass
+
+@sio.event
+async def set_expression(sid, data):
+    """
+    data contoh:
+    {
+      "expr": "smile" | "think" | "neutral" | "surprised",
+      "intensity": 0.0 - 1.0
+    }
+    """
+    print("[SERVER] Set Expression:", data)
+    await sio.emit("ui:expression", data)
+
+
+@sio.event
+async def gesture_event(sid, data):
+    await sio.emit("viewer:command", data)
+
+@sio.event
 async def start_audio(sid, data=None):
     global audio_loop, loop_task
     
@@ -224,10 +246,16 @@ async def start_audio(sid, data=None):
         print(f"Sending Browser data to frontend: {len(data.get('log', ''))} chars logs")
         asyncio.create_task(sio.emit('browser_frame', data))
         
-    # Callback to send Transcription data to frontend
     def on_transcription(data):
-        # data = {"sender": "User"|"ADA", "text": "..."}
-        asyncio.create_task(sio.emit('transcription', data))
+        asyncio.create_task(
+            sio.emit('transcription', data)
+        )
+
+        if data.get("sender") == "ADA":
+            asyncio.create_task(
+                sio.emit("ui:speaking", True)
+            )
+
 
     # Callback to send Confirmation Request to frontend
     def on_tool_confirmation(data):

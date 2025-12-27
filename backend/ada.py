@@ -1,4 +1,5 @@
 import asyncio
+import types
 import base64
 import io
 import os
@@ -13,9 +14,11 @@ import argparse
 import math
 import struct
 import time
+import socketio
+
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
 from google import genai
-from google.genai import types
 
 if sys.version_info < (3, 11, 0):
     import taskgroup, exceptiongroup
@@ -23,6 +26,9 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
+
+async def emit_viseme(sio, shape):
+    await sio.emit("ui:viseme", {"shape": shape})
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -36,7 +42,6 @@ DEFAULT_MODE = "camera"
 load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
-# Function definitions
 generate_cad = {
     "name": "generate_cad",
     "description": "Generates a 3D CAD model based on a prompt.",
@@ -182,21 +187,25 @@ iterate_cad_tool = {
 
 tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
 
-# --- CONFIG UPDATE: Enabled Transcription ---
-config = types.LiveConnectConfig(
+config = genai.types.LiveConnectConfig(
     response_modalities=["AUDIO"],
-    # We switch these from [] to {} to enable them with default settings
-    output_audio_transcription={}, 
+
+    output_audio_transcription={},
     input_audio_transcription={},
-    system_instruction="Your name is Ada, which stands for Advanced Design Assistant. "
+
+    system_instruction=(
+        "Your name is LEO, which stands for Advanced Design Assistant. "
         "You have a witty and charming personality. "
         "Your creator is Naz, and you address him as 'Sir'. "
         "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality.",
+        "You have a fun personality."
+    ),
+
     tools=tools,
-    speech_config=types.SpeechConfig(
-        voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+
+    speech_config=genai.types.SpeechConfig(
+        voice_config=genai.types.VoiceConfig(
+            prebuilt_voice_config=genai.types.PrebuiltVoiceConfig(
                 voice_name="Kore"
             )
         )
@@ -270,6 +279,10 @@ class AudioLoop:
         self._latest_image_payload = None
         # VAD State
         self._is_speaking = False
+        try:
+            asyncio.create_task(sio.emit("ui:speaking", False))
+        except Exception:
+            pass
         self._silence_start_time = None
         
         # Initialize ProjectManager
@@ -459,11 +472,15 @@ class AudioLoop:
                             self._silence_start_time = time.time()
                         
                         elif time.time() - self._silence_start_time > SILENCE_DURATION:
-                            # Silence confirmed, reset state
-                            print(f"[ADA DEBUG] [VAD] Silence detected. Resetting speech state.")
+                            print("[ADA DEBUG] [VAD] Silence detected. Resetting speech state.")
                             self._is_speaking = False
                             self._silence_start_time = None
 
+                            if self.on_transcription:
+                                self.on_transcription({
+                                    "sender": "ADA",
+                                    "text": ""
+                                })
             except Exception as e:
                 print(f"Error reading audio: {e}")
                 await asyncio.sleep(0.1)
