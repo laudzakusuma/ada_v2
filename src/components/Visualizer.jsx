@@ -4,11 +4,12 @@ import FaceEmote from "./FaceEmote/FaceEmote";
 const Visualizer = ({
   audioData,
   isListening,
-  intensity = 0,
+  speechLevel,
+  intensity,
   width = 600,
   height = 400,
   expression = "neutral",
-  isSpeaking = false,
+  isSpeaking,
   viseme = 0,
 }) => {
   const [mouthOpen, setMouthOpen] = useState(0);
@@ -45,10 +46,13 @@ const Visualizer = ({
     >
       {/* FACE */}
       <FaceEmote
-        expression={expression}
+        speechLevel={speechLevel}
         isSpeaking={isSpeaking}
+        expression={isSpeaking ? "talk" : "idle"}
+        intensity={intensity}
+        speaking={isSpeaking}
         viseme={viseme}
-        size={Math.min(width, height) * 0.45}
+        size={260}
       />
     </div>
   );

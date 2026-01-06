@@ -48,7 +48,10 @@ function App() {
 
 
     const [isConnected, setIsConnected] = useState(false); // Power state DEFAULT ON
+    const [isListening, setIsListening] = useState(false)
     const [isSpeaking, setIsSpeaking] = useState(false);
+    const [speechLevel, setSpeechLevel] = useState(0);
+    const speakingTimeoutRef = useRef(null);
     const [isMuted, setIsMuted] = useState(true); // Mic state DEFAULT MUTED
     const [isVideoOn, setIsVideoOn] = useState(false); // Video state
     const [messages, setMessages] = useState([]);
@@ -342,15 +345,16 @@ function App() {
     }, [isConnected, isAuthenticated, socketConnected, micDevices, selectedMicId]);
 
     useEffect(() => {
-        // Socket IO Setup
         socket.on('connect', () => {
+            console.log("socket connected");
             setStatus('Connected');
-            setSocketConnected(true);
+            setIsConnected(true);
             socket.emit('get_settings');
         });
         socket.on('disconnect', () => {
+            console.log("socket disconnected");
             setStatus('Disconnected');
-            setSocketConnected(false);
+            setIsConnected(false);
         });
         socket.on('status', (data) => {
             addMessage('System', data.msg);
@@ -361,8 +365,29 @@ function App() {
                 setStatus('Connected');
             }
         });
+
         socket.on('audio_data', (data) => {
             setAiAudioData(data.data);
+
+            // === LIPSYNC REAL ===
+            if (!data.data || data.data.length === 0) return;
+
+            let sum = 0;
+            for (let i = 0; i < data.data.length; i++) {
+                sum += Math.abs(data.data[i]);
+            }
+
+            const level = Math.min(sum / data.data.length / 128, 1);
+
+            setSpeechLevel(level);
+            setIsSpeaking(level > 0.03);
+
+            // Auto close mouth after silence
+            clearTimeout(speakingTimeoutRef.current);
+            speakingTimeoutRef.current = setTimeout(() => {
+                setIsSpeaking(false);
+                setSpeechLevel(0);
+            }, 250);
         });
         socket.on('auth_status', (data) => {
             console.log("Auth Status:", data);
@@ -1536,11 +1561,13 @@ function App() {
                     <div className="relative z-20">
                         <Visualizer
                             audioData={aiAudioData}
-                            isListening={isConnected && !isMuted}
-                            intensity={audioAmp}
+                            isListening={isListening}
+                            speechLevel={speechLevel}
+                            intensity={speechLevel}
 
                             expression={uiExpression}
                             isSpeaking={isSpeaking}
+
                             viseme={uiViseme}
                         />
                     </div>

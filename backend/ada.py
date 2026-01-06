@@ -278,13 +278,7 @@ class AudioLoop:
         # Video buffering state
         self._latest_image_payload = None
         # VAD State
-        self._is_speaking = False
-        try:
-            asyncio.create_task(sio.emit("ui:speaking", False))
-        except Exception:
-            pass
-        self._silence_start_time = None
-        
+        self._is_speaking = False      
         # Initialize ProjectManager
         from project_manager import ProjectManager
         # Assuming we are running from backend/ or root? 
@@ -457,6 +451,7 @@ class AudioLoop:
                     if not self._is_speaking:
                         # NEW Speech Utterance Started
                         self._is_speaking = True
+                        await sio.emit("ui:speaking", True)
                         print(f"[ADA DEBUG] [VAD] Speech Detected (RMS: {rms}). Sending Video Frame.")
                         
                         # Send ONE frame
