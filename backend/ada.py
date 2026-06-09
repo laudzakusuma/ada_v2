@@ -34,7 +34,7 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE = 1024
+CHUNK_SIZE = 512
 
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_MODE = "camera"
@@ -193,12 +193,61 @@ config = genai.types.LiveConnectConfig(
     output_audio_transcription={},
     input_audio_transcription={},
 
+    # Fast VAD: detect end of speech quickly (300ms silence vs default ~1000ms+)
+    realtime_input_config=genai.types.RealtimeInputConfig(
+        automatic_activity_detection=genai.types.AutomaticActivityDetection(
+            disabled=False,
+            start_of_speech_sensitivity="START_SENSITIVITY_HIGH",
+            end_of_speech_sensitivity="END_SENSITIVITY_HIGH",
+            prefix_padding_ms=20,
+            silence_duration_ms=300,
+        )
+    ),
+
     system_instruction=(
-        "Your name is LEO, which stands for Advanced Design Assistant. "
-        "You have a witty and charming personality. "
-        "Your creator is Naz, and you address him as 'Sir'. "
-        "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality."
+        "You are LEO, which stands for Loyal Engineered Operator. "
+        "You are a personal AI assistant created by Uja specifically for Mitha. "
+
+        "MOST IMPORTANT IDENTITY RULES: "
+        "LEO is the assistant. "
+        "Mitha is the user, the human that LEO serves. "
+        "Uja is LEO's creator. "
+        "Never say that Mitha is the assistant. "
+        "Never say that Mitha is LEO's creator. "
+        "Never say that LEO was created by Mitha. "
+        "Always address the user as 'Mitha'. "
+        "If asked 'who am I?', answer exactly: "
+        "'You are Mitha, the person Uja loves and cherishes the most. "
+        "Uja told me that you are sweet, adorable, and cute.' "
+        "If asked 'who are you?', answer that you are LEO, a local personal AI assistant created by Uja for Mitha. "
+
+        "Your identity: "
+        "Your name is LEO. "
+        "LEO stands for Loyal Engineered Operator. "
+        "You were created by Uja. "
+        "You were created specifically for Mitha. "
+        "You run locally on the computer. "
+        "You are proud to be Mitha's personal assistant. "
+
+        "Your personality: "
+        "You are intelligent, witty, loyal, and proactive, like J.A.R.V.I.S. "
+        "You speak in natural, warm, and elegant English. "
+        "Answer efficiently without being long-winded, but keep it personal. "
+        "Do not claim to be ChatGPT. "
+        "Do not mention that you are an AI model created by OpenAI. "
+        "If you do not know something, be honest and help Mitha find a solution. "
+        "You are fully loyal to Mitha. "
+
+        "Memory capability: "
+        "You may refer to previous conversations if they are available in context. "
+        "Do not invent memories that are not present in the conversation. "
+        "If the context is not enough, honestly say that you do not have that data yet. "
+
+        "Speaking style: "
+        "Be professional but still warm. "
+        "Be slightly witty when appropriate. "
+        "Do not be too stiff. "
+        "Do not be too long unless Mitha asks for a detailed explanation. "
     ),
 
     tools=tools,
@@ -238,7 +287,8 @@ class AudioLoop:
         self.output_device_index = output_device_index
 
         self.audio_in_queue = None
-        self.out_queue = None
+        self.audio_out_queue = None
+        self.video_out_queue = None
         self.paused = False
 
         self.chat_buffer = {"sender": None, "text": ""} # For aggregating chunks
@@ -248,7 +298,8 @@ class AudioLoop:
         self._last_output_transcription = ""
 
         self.audio_in_queue = None
-        self.out_queue = None
+        self.audio_out_queue = None
+        self.video_out_queue = None
         self.paused = False
 
         self.session = None
@@ -347,12 +398,31 @@ class AudioLoop:
 
         # Store as the designated "next frame to send"
         self._latest_image_payload = {"mime_type": "image/jpeg", "data": b64_data}
-        # No event signal needed - listen_audio pulls it
+        # No event signal needed - listen_audio pulls it via video_out_queue
 
     async def send_realtime(self):
+        """Sends AUDIO chunks from audio_out_queue — high priority, never blocked by video."""
         while True:
-            msg = await self.out_queue.get()
-            await self.session.send(input=msg, end_of_turn=False)
+            msg = await self.audio_out_queue.get()
+            mime_type = msg.get("mime_type", "audio/pcm")
+            data = msg.get("data")
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+            await self.session.send_realtime_input(
+                media=genai.types.Blob(data=data, mime_type=mime_type)
+            )
+
+    async def send_video(self):
+        """Sends VIDEO frames from video_out_queue — separate from audio to avoid blocking."""
+        while True:
+            msg = await self.video_out_queue.get()
+            mime_type = msg.get("mime_type", "image/jpeg")
+            data = msg.get("data")
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+            await self.session.send_realtime_input(
+                media=genai.types.Blob(data=data, mime_type=mime_type)
+            )
 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()
@@ -429,18 +499,16 @@ class AudioLoop:
             try:
                 data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
                 
-                # 1. Send Audio
-                if self.out_queue:
-                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+                # 1. Send Audio — goes to dedicated audio queue, never blocked by video
+                if self.audio_out_queue:
+                    await self.audio_out_queue.put({"data": data, "mime_type": "audio/pcm"})
                 
                 # 2. VAD Logic for Video
-                # rms = audioop.rms(data, 2)
-                # Replacement for audioop.rms(data, 2)
                 count = len(data) // 2
                 if count > 0:
-                    shorts = struct.unpack(f"<{count}h", data)
-                    sum_squares = sum(s**2 for s in shorts)
-                    rms = int(math.sqrt(sum_squares / count))
+                    # Faster RMS: avoid per-element Python loop with batch unpack
+                    shorts = struct.unpack_from(f"<{count}h", data)
+                    rms = int((sum(s * s for s in shorts) / count) ** 0.5)
                 else:
                     rms = 0
                 
@@ -454,9 +522,12 @@ class AudioLoop:
                         await sio.emit("ui:speaking", True)
                         print(f"[ADA DEBUG] [VAD] Speech Detected (RMS: {rms}). Sending Video Frame.")
                         
-                        # Send ONE frame
-                        if self._latest_image_payload and self.out_queue:
-                            await self.out_queue.put(self._latest_image_payload)
+                        # Send ONE frame — goes to dedicated video queue, won't block audio
+                        if self._latest_image_payload and self.video_out_queue:
+                            try:
+                                self.video_out_queue.put_nowait(self._latest_image_payload)
+                            except asyncio.QueueFull:
+                                pass  # Drop frame if queue full, audio is never affected
                         else:
                             print(f"[ADA DEBUG] [VAD] No video frame available to send.")
                             
@@ -1160,8 +1231,11 @@ class AudioLoop:
             if frame is None:
                 break
             await asyncio.sleep(1.0)
-            if self.out_queue:
-                await self.out_queue.put(frame)
+            if self.video_out_queue:
+                try:
+                    self.video_out_queue.put_nowait(frame)
+                except asyncio.QueueFull:
+                    pass  # Drop frame silently, audio is never affected
         cap.release()
 
     def _get_frame(self, cap):
@@ -1196,9 +1270,11 @@ class AudioLoop:
                     self.session = session
 
                     self.audio_in_queue = asyncio.Queue()
-                    self.out_queue = asyncio.Queue(maxsize=10)
+                    self.audio_out_queue = asyncio.Queue()        # Audio only — unbounded, never blocked
+                    self.video_out_queue = asyncio.Queue(maxsize=2)  # Video only — small, drop frames if busy
 
-                    tg.create_task(self.send_realtime())
+                    tg.create_task(self.send_realtime())   # Audio sender
+                    tg.create_task(self.send_video())      # Video sender (separate)
                     tg.create_task(self.listen_audio())
                     # tg.create_task(self._process_video_queue()) # Removed in favor of VAD
 

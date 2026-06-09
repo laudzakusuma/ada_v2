@@ -21,7 +21,10 @@ import FaceEmote from "./components/FaceEmote/FaceEmote";
 
 
 const socket = io('http://localhost:8000');
-const { ipcRenderer } = window.require('electron');
+// ipcRenderer is only available in Electron. In browser (Vite dev), use stubs.
+const ipcRenderer = (typeof window !== 'undefined' && window.require)
+    ? window.require('electron').ipcRenderer
+    : { send: () => {} };
 
 function App() {
     const [uiMode, setUiMode] = useState("idle");
